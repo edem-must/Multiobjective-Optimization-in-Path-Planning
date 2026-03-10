@@ -19,7 +19,7 @@ class PathPlanningExperiment:
             start=self.start,
             goal=self.goal,
             c1=1.0,
-            c2=0.5,
+            c2=0.0,
             c3=0.5
         )
 
@@ -53,12 +53,23 @@ class PathPlanningExperiment:
         ys = np.linspace(self.start[1], self.goal[1], n_points)
         points = np.stack([xs, ys], axis=1)
         return path.Path(points)
-
+    """
     def run_gradient(self) -> Tuple[path.Path, path.OptimizationHistory]:
         initial = self.create_initial_path()
         opt = optimize.AdamPathOptimizer(self.problem)
         best_path = opt.optimize(initial)
         return best_path, opt.history
+    """
+    def run_gradient(self)-> Tuple[path.Path, path.OptimizationHistory]:
+        initial = self.create_initial_path()
+        # break straight-line symmetry before Adam starts
+        noise = np.random.uniform(-8.0, 8.0, initial.points[1:-1].shape)
+        initial.points[1:-1] += noise
+        initial.points[1:-1, 0] = np.clip(initial.points[1:-1, 0], 0, self.game_map.width)
+        initial.points[1:-1, 1] = np.clip(initial.points[1:-1, 1], 0, self.game_map.height)
+        opt = optimize.AdamPathOptimizer(self.problem)
+        return opt.optimize(initial), opt.history
+
 
     def run_pso(self) -> Tuple[path.Path, path.OptimizationHistory]:
         initial = self.create_initial_path()

@@ -48,10 +48,25 @@ class PathPlanningProblem:
         energies = [self.map.energy_at(p) for p in path.points]
         return float(np.sum(energies))
 
+    '''
     def path_risk(self, path: Path) -> float:
         # R(γ) = sum 1/(||pi - ti||^2 + eps)
         risks = [self.map.collision_risk_at(p) for p in path.points]
         return float(np.sum(risks))
+    '''
+    def path_risk(self, path: Path) -> float:
+        total = 0.0
+        n = path.n_points
+        samples_per_segment = 5   # interpolate between each pair of waypoints
+
+        for i in range(n - 1):
+            for t in np.linspace(0, 1, samples_per_segment, endpoint=False):
+                p = (1 - t) * path.points[i] + t * path.points[i + 1]
+                total += self.map.collision_risk_at(p)
+
+        total += self.map.collision_risk_at(path.points[-1])
+        return total
+
 
     def objective(self, path: Path) -> float:
         # F(γ) = C1 L + C2 E + C3 R
@@ -60,39 +75,57 @@ class PathPlanningProblem:
                 self.c3 * self.path_risk(path))
 
     def gradient(self, path: Path) -> np.ndarray:
-        """
-        ∇F wrt inner waypoints pi (keep start, goal fixed).
-        Returns array of shape (n_points, 2).
-        Start and goal gradients are zero.
-        """
         n = path.n_points
         grad = np.zeros_like(path.points)
 
-        # Gradient of length term as in thesis (only inner points)
         for i in range(1, n - 1):
             pi = path.points[i]
             p_prev = path.points[i - 1]
             p_next = path.points[i + 1]
 
+            # Analytical length gradient (thesis eq. 3.2)
             v1 = pi - p_prev
             v2 = pi - p_next
-            # avoid division by zero
             gL = v1 / (np.linalg.norm(v1) + 1e-8) + \
-                 v2 / (np.linalg.norm(v2) + 1e-8)
+                v2 / (np.linalg.norm(v2) + 1e-8)
 
-            # Approximate energy and risk gradients by finite differences
-            gE = self._numerical_gradient_single_point(
-                path, i, self.path_energy
-            )
-            gR = self._numerical_gradient_single_point(
-                path, i, self.path_risk
-            )
+            # Numerical energy gradient (terrain grid, finite diff is fine here)
+            gE = self._numerical_gradient_single_point(path, i, self.path_energy)
 
-            grad[i] = (self.c1 * gL +
-                       self.c2 * gE +
-                       self.c3 * gR)
+            # Analytical risk gradient — NO finite differences
+            #gR = self.map.collision_risk_gradient_at(pi)
+            gR = self.risk_gradient_at_waypoint(path, i)
+
+            grad[i] = self.c1 * gL + self.c2 * gE + self.c3 * gR
 
         return grad
+    
+    def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
+        """
+        Gradient of segment-sampled risk w.r.t. waypoint at given index.
+        Consistent with path_risk() which samples along segments.
+        """
+        samples = 10   # same resolution as path_risk
+        grad = np.zeros(2)
+        pts = path.points
+        n = path.n_points
+
+        # contribution from segment [p_{index-1}, p_{index}]
+        if index > 0:
+            for t in np.linspace(0, 1, samples, endpoint=False):
+                s = (1 - t) * pts[index - 1] + t * pts[index]
+                g = self.map.collision_risk_gradient_at(s)
+                grad += t * g          # chain rule: ds/dp_i = t
+
+        # contribution from segment [p_{index}, p_{index+1}]
+        if index < n - 1:
+            for t in np.linspace(0, 1, samples, endpoint=False):
+                s = (1 - t) * pts[index] + t * pts[index + 1]
+                g = self.map.collision_risk_gradient_at(s)
+                grad += (1 - t) * g   # chain rule: ds/dp_i = (1-t)
+
+        return grad
+
 
     def _numerical_gradient_single_point(
         self,
@@ -103,7 +136,7 @@ class PathPlanningProblem:
         """
         Finite-difference gradient wrt single waypoint at given index.
         """
-        eps = 1e-3
+        eps = 0.5
         base_path = path.copy()
         base_val = func(base_path)
 

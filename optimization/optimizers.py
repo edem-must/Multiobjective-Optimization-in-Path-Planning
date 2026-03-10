@@ -43,12 +43,12 @@ class AdamPathOptimizer(PathOptimizer):
     """
     def __init__(self,
                  problem: PathPlanningProblem,
-                 lr: float = 0.01,
+                 lr: float = 1.0,
                  beta1: float = 0.9,
                  beta2: float = 0.999,
                  eps: float = 1e-8,
                  max_iters: int = 500,
-                 tolerance: float = 1e-4):
+                 tolerance: float = 1e-6):
         super().__init__(problem)
         self.lr = lr
         self.beta1 = beta1
@@ -75,6 +75,7 @@ class AdamPathOptimizer(PathOptimizer):
             # stop if gradient on inner points is small
             grad_inner = grad[1:-1]
             if np.linalg.norm(grad_inner) < self.tolerance:
+                print(f"Adam converged at iteration {_}, obj={obj:.4f}")
                 break
 
             # Adam update only on inner waypoints (keep endpoints fixed)
@@ -89,7 +90,14 @@ class AdamPathOptimizer(PathOptimizer):
 
             new_points = path.points.copy()
             new_points[1:-1] -= step  # gradient descent direction
-
+            
+            # keep waypoints within map bounds
+            new_points[1:-1, 0] = np.clip(
+                new_points[1:-1, 0], 0, self.problem.map.width
+            )
+            new_points[1:-1, 1] = np.clip(
+                new_points[1:-1, 1], 0, self.problem.map.height
+            )
             path.points = new_points
 
         return path
@@ -110,8 +118,8 @@ class ParticleSwarmOptimizer(PathOptimizer):
     """
     def __init__(self,
                  problem: PathPlanningProblem,
-                 n_particles: int = 20,
-                 max_iters: int = 300,
+                 n_particles: int = 50,
+                 max_iters: int = 2000,
                  omega: float = 0.4,
                  phi_p: float = 1.0,
                  phi_g: float = 1.0):
@@ -137,9 +145,14 @@ class ParticleSwarmOptimizer(PathOptimizer):
         pts[-1] = template.points[-1]
 
         for i in range(1, n - 1):
-            pts[i, 0] = np.random.uniform(0, self.problem.map.width)
-            pts[i, 1] = np.random.uniform(0, self.problem.map.height)
-
+            t = i / (n - 1)
+            base = (1 - t) * template.points[0] + t * template.points[-1]
+            noise = np.random.uniform(-20, 20, size=2)  # controlled perturbation
+            pts[i] = np.clip(
+                base + noise,
+                [0, 0],
+                [self.problem.map.width, self.problem.map.height]
+                )   
         return Path(pts)
 
     def _init_swarm(self, template: Path):

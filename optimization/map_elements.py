@@ -12,7 +12,7 @@ class GameMap:
                  height: float,
                  terrain: "TerrainField",
                  obstacles: List["Obstacle"],
-                 risk_epsilon: float = 0.1):
+                 risk_epsilon: float = 0.000001):
         self.width = width
         self.height = height
         self.terrain = terrain
@@ -40,7 +40,35 @@ class GameMap:
         Here t is nearest obstacle surface point, approximated via distance.
         """
         d = self.nearest_obstacle_distance(point)
-        return 1.0 / (d * d + self.risk_epsilon)
+        d_safe = max(d, 1e-3)       # avoid /0 but keep gradient
+        influence_radius = 20.0     # how far obstacles "push" the path
+
+        if d >= influence_radius:
+            return 0.0
+
+        # Standard robotics repulsion potential (Khatib 1986)
+        # Smooth, non-zero gradient everywhere, blows up near surface
+        return 0.5 * ((1.0 / d_safe) - (1.0 / influence_radius)) ** 2
+    
+    def collision_risk_gradient_at(self, point: np.ndarray) -> np.ndarray:
+        """Analytical gradient of repulsion potential — no finite differences."""
+        influence_radius = 20.0
+        best_dist = float("inf")
+        best_grad_dir = np.zeros(2)
+
+        for obs in self.obstacles:
+            d, grad_dir = obs.distance_and_gradient(point)
+            if d < best_dist:
+                best_dist = d
+                best_grad_dir = grad_dir
+
+        d_safe = max(best_dist, 1e-3)
+        if best_dist >= influence_radius:
+            return np.zeros(2)
+
+        # ∂U/∂p = -(1/d - 1/d0) * (1/d^2) * ∂d/∂p
+        scalar = -((1.0 / d_safe) - (1.0 / influence_radius)) / (d_safe ** 2)
+        return scalar * best_grad_dir
 
 class TerrainField:
     """
@@ -96,6 +124,11 @@ class Obstacle(ABC):
     @abstractmethod
     def distance_to(self, point: np.ndarray) -> float:
         pass
+    
+    @abstractmethod
+    def distance_and_gradient(self, point: np.ndarray) -> Tuple[float, np.ndarray]:
+        """Returns (distance, unit vector pointing away from obstacle)."""
+        pass
 
 class RectObstacle(Obstacle):
     """
@@ -115,6 +148,29 @@ class RectObstacle(Obstacle):
             return 0.0
         return float(np.hypot(dx, dy))
 
+    def distance_and_gradient(self, point: np.ndarray):
+        """Returns (distance, unit vector pointing away from obstacle)."""
+        x, y = point
+        dx = max(self.x_min - x, 0.0, x - self.x_max)
+        dy = max(self.y_min - y, 0.0, y - self.y_max)
+        dist = float(np.hypot(dx, dy))
+
+        if dist < 1e-9:
+            # inside: push toward nearest face
+            cx = (self.x_min + self.x_max) / 2
+            cy = (self.y_min + self.y_max) / 2
+            grad_dir = np.array([x - cx, y - cy])
+            norm = np.linalg.norm(grad_dir)
+            grad_dir = grad_dir / (norm + 1e-9)
+            return 0.0, grad_dir
+
+        gx = -1.0 if (self.x_min - x) > 0 else (1.0 if (x - self.x_max) > 0 else 0.0)
+        gy = -1.0 if (self.y_min - y) > 0 else (1.0 if (y - self.y_max) > 0 else 0.0)
+        grad_dir = np.array([gx, gy])
+        norm = np.linalg.norm(grad_dir)
+        grad_dir = grad_dir / (norm + 1e-9)
+        return dist, grad_dir
+
 class CircleObstacle(Obstacle):
     def __init__(self, center: Tuple[float, float], radius: float):
         self.center = np.array(center, dtype=float)
@@ -125,3 +181,13 @@ class CircleObstacle(Obstacle):
         if d <= self.radius:
             return 0.0
         return float(d - self.radius)
+    
+    def distance_and_gradient(self, point: np.ndarray):
+        """Returns (distance, unit vector pointing away from obstacle)."""
+        vec = point - self.center
+        d = np.linalg.norm(vec)
+        if d < 1e-9:
+            return 0.0, np.array([1.0, 0.0])  # arbitrary direction if dead center
+        dist = float(max(0.0, d - self.radius))
+        grad_dir = vec / d   # outward unit vector
+        return dist, grad_dir
