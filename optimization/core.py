@@ -6,7 +6,16 @@ from optimization.map_elements import GameMap
 
 class Path:
     """
-    Represents a path γ = [p1, ..., pn] with pi in R^2.
+    Represents a path γ in 2D continuous space as defined in the thesis (Section 1.2).
+
+    A path is stored as an ordered sequence of n waypoints (knots) p_i ∈ R²,
+    where p_0 is the start point A and p_{n-1} is the goal point B.
+    All optimization algorithms operate by modifying the inner waypoints
+    p_1, ..., p_{n-2} while keeping the endpoints fixed.
+
+    Attributes:
+        points (np.ndarray): Array of shape (n_points, 2) containing [x, y]
+                             coordinates of each waypoint.
     """
     def __init__(self, points: np.ndarray):
         # shape: (n_points, 2)
@@ -14,15 +23,35 @@ class Path:
 
     @property
     def n_points(self) -> int:
+        """Returns the total number of waypoints including start and goal."""
         return self.points.shape[0]
 
     def copy(self) -> "Path":
+        """Returns a deep copy of this path. Used by optimizers to avoid
+        mutating candidate solutions during evaluation."""
         return Path(self.points.copy())
 
 class PathPlanningProblem:
     """
-    Holds the formal problem: map, weights C1,C2,C3, start A, goal B.
-    Provides L(γ), E(γ), R(γ), F(γ) and their gradients.
+    Encapsulates the formal path optimization problem from the thesis (Section 1.2).
+
+    The problem is defined as minimizing the composite objective:
+        F(γ) = C1 * L(γ) + C2 * E(γ) + C3 * R(γ)
+
+    where:
+        L(γ) — total Euclidean path length (eq. 1.2)
+        E(γ) — cumulative terrain energy cost along the path (eq. 1.3)
+        R(γ) — cumulative collision risk with respect to obstacles (eq. 1.4)
+        C1, C2, C3 — scalar weights controlling trade-offs between objectives
+
+    This class provides both the objective value and its gradient with respect
+    to the inner waypoints, used by gradient-based optimizers.
+
+    Attributes:
+        map (GameMap):        The environment containing terrain and obstacles.
+        start (np.ndarray):   Start point A = [x, y].
+        goal (np.ndarray):    Goal point B = [x, y].
+        c1, c2, c3 (float):   Objective weights for length, energy, and risk.
     """
     def __init__(self,
                  game_map: "GameMap",
@@ -39,22 +68,60 @@ class PathPlanningProblem:
         self.c3 = c3
 
     def path_length(self, path: Path) -> float:
-        # L(γ)
+        """
+        Computes the total path length L(γ) as the sum of Euclidean distances
+        between consecutive waypoints (thesis eq. 1.2):
+
+            L(γ) = Σ ||p_i - p_{i+1}||₂  for i = 1..n-1
+
+        Args:
+            path: The path to evaluate.
+
+        Returns:
+            Scalar total length.
+        """
         diffs = path.points[1:] - path.points[:-1]
         return float(np.sum(np.linalg.norm(diffs, axis=1)))
 
     def path_energy(self, path: Path) -> float:
-        # E(γ) = sum e(pi)
+        """
+        Computes the cumulative terrain energy cost E(γ) (thesis eq. 1.3):
+
+            E(γ) = Σ e(γ_i)
+
+        where e(p) is the terrain energy at position p, provided by the map's
+        TerrainField via bilinear interpolation of the energy grid.
+
+        Args:
+            path: The path to evaluate.
+
+        Returns:
+            Scalar total energy consumption.
+        """
         energies = [self.map.energy_at(p) for p in path.points]
         return float(np.sum(energies))
 
-    '''
     def path_risk(self, path: Path) -> float:
-        # R(γ) = sum 1/(||pi - ti||^2 + eps)
-        risks = [self.map.collision_risk_at(p) for p in path.points]
-        return float(np.sum(risks))
-    '''
-    def path_risk(self, path: Path) -> float:
+        """
+        Computes the cumulative collision risk R(γ) using segment sampling.
+
+        Unlike a naive implementation that only evaluates risk at discrete
+        waypoints, this method interpolates additional sample points along
+        each segment p_i → p_{i+1}. This ensures that obstacle crossings
+        between waypoints are detected and penalized.
+
+        The risk at each sample uses a Khatib-style repulsion potential:
+            U(d) = 0.5 * (1/d - 1/d_0)²   if d < d_0
+                   0                          otherwise
+        where d is the distance to the nearest obstacle and d_0 is the
+        influence radius.
+
+        Args:
+            path: The path to evaluate.
+
+        Returns:
+            Scalar total risk.
+        """
         total = 0.0
         n = path.n_points
         samples_per_segment = 5   # interpolate between each pair of waypoints
@@ -69,12 +136,43 @@ class PathPlanningProblem:
 
 
     def objective(self, path: Path) -> float:
-        # F(γ) = C1 L + C2 E + C3 R
+        """
+        Evaluates the full weighted composite objective F(γ) (thesis eq. 1.1):
+
+            F(γ) = C1 * L(γ) + C2 * E(γ) + C3 * R(γ)
+
+        This is the function that all optimization algorithms minimize.
+
+        Args:
+            path: The path to evaluate.
+
+        Returns:
+            Scalar objective value.
+        """
         return (self.c1 * self.path_length(path) +
                 self.c2 * self.path_energy(path) +
                 self.c3 * self.path_risk(path))
 
     def gradient(self, path: Path) -> np.ndarray:
+        """
+        Computes the gradient ∇F of the objective with respect to all inner
+        waypoints p_1, ..., p_{n-2}. The start and goal gradients are fixed
+        at zero since those points are never moved.
+
+        The total gradient is a linear combination (thesis eq. 3.5):
+            ∇F = C1 * ∇L + C2 * ∇E + C3 * ∇R
+
+        Each component is computed differently:
+          - ∇L: analytical (thesis eq. 3.2)
+          - ∇E: numerical finite differences (terrain is smooth, this is sufficient)
+          - ∇R: analytical + segment-weighted chain rule (see risk_gradient_at_waypoint)
+
+        Args:
+            path: Current path whose inner waypoints are being optimized.
+
+        Returns:
+            np.ndarray of shape (n_points, 2). Rows 0 and n-1 are always zero.
+        """
         n = path.n_points
         grad = np.zeros_like(path.points)
 
@@ -83,17 +181,22 @@ class PathPlanningProblem:
             p_prev = path.points[i - 1]
             p_next = path.points[i + 1]
 
-            # Analytical length gradient (thesis eq. 3.2)
+            # Analytical length gradient (thesis eq. 3.2):
+            # Two unit vectors from pi toward its neighbors, summed.
+            # On a straight-line path these cancel → zero → initial path
+            # must be perturbed before running the optimizer.
             v1 = pi - p_prev
             v2 = pi - p_next
             gL = v1 / (np.linalg.norm(v1) + 1e-8) + \
                 v2 / (np.linalg.norm(v2) + 1e-8)
 
-            # Numerical energy gradient (terrain grid, finite diff is fine here)
+            # Numerical gradient for energy (finite differences).
+            # Terrain is stored as a smooth bilinear grid so this is accurate.
             gE = self._numerical_gradient_single_point(path, i, self.path_energy)
 
-            # Analytical risk gradient — NO finite differences
-            #gR = self.map.collision_risk_gradient_at(pi)
+            # Analytical segment-consistent risk gradient.
+            # This accounts for all sample points on adjacent segments
+            # that are influenced by moving waypoint i.
             gR = self.risk_gradient_at_waypoint(path, i)
 
             grad[i] = self.c1 * gL + self.c2 * gE + self.c3 * gR
@@ -102,8 +205,26 @@ class PathPlanningProblem:
     
     def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
         """
-        Gradient of segment-sampled risk w.r.t. waypoint at given index.
-        Consistent with path_risk() which samples along segments.
+        Computes the gradient of the segment-sampled risk with respect to a
+        single waypoint p_index, consistent with path_risk().
+
+        Moving waypoint p_i shifts all interpolated sample points on the two
+        adjacent segments. By the chain rule:
+          - On segment [p_{i-1}, p_i]: sample s(t) = (1-t)*p_{i-1} + t*p_i
+            so ∂s/∂p_i = t
+          - On segment [p_i, p_{i+1}]: sample s(t) = (1-t)*p_i + t*p_{i+1}
+            so ∂s/∂p_i = (1-t)
+
+        The risk gradient at each sample is provided analytically by the map
+        (via obstacle distance_and_gradient methods), ensuring correctness
+        even when samples are inside or near obstacle boundaries.
+
+        Args:
+            path:  Current path.
+            index: Index of the waypoint to differentiate with respect to.
+
+        Returns:
+            np.ndarray of shape (2,) — gradient vector at this waypoint.
         """
         samples = 10   # same resolution as path_risk
         grad = np.zeros(2)
@@ -134,7 +255,21 @@ class PathPlanningProblem:
         func
     ) -> np.ndarray:
         """
-        Finite-difference gradient wrt single waypoint at given index.
+        Estimates the gradient of a scalar function with respect to a single
+        waypoint using central finite differences:
+
+            ∂f/∂x ≈ (f(x + ε) - f(x - ε)) / (2ε)
+
+        eps=0.5 is chosen to be large enough relative to the map scale (0–100)
+        for accurate estimation, but small enough to remain local.
+
+        Args:
+            path:  Current path.
+            index: Index of the waypoint to differentiate.
+            func:  Scalar function Path → float to differentiate.
+
+        Returns:
+            np.ndarray of shape (2,) — [∂f/∂x, ∂f/∂y].
         """
         eps = 0.5
         base_path = path.copy()
@@ -157,19 +292,45 @@ class PathPlanningProblem:
 
 class OptimizationHistory:
     """
-    Stores intermediate paths for visualization of the workflow.
+    Records the intermediate states of an optimization algorithm for visualization.
+
+    After the algorithm finishes, the stored sequence of paths can be replayed
+    to illustrate how the solution evolved over iterations — this corresponds
+    to the workflow visualization described in the experiment methodology (Chapter 4).
+
+    Attributes:
+        paths (List[Path]):           Snapshots of the path at each recorded iteration.
+        objective_values (List[float]): Corresponding objective function values F(γ).
     """
     def __init__(self):
         self.paths: List[Path] = []
         self.objective_values: List[float] = []
 
     def add(self, path: Path, obj: float):
+        """
+        Saves a copy of the current path and its objective value.
+
+        A copy is saved (not a reference) so that subsequent modifications
+        by the optimizer do not overwrite this snapshot.
+
+        Args:
+            path: Current path at this iteration.
+            obj:  Value of F(γ) at this iteration.
+        """
         self.paths.append(path.copy())
         self.objective_values.append(obj)
 
 class PathOptimizer(ABC):
     """
-    Abstract base for path optimization algorithms.
+    Abstract base class for all path optimization algorithms.
+
+    Defines a common interface so that different algorithms
+    (gradient-based, swarm-based) can be used interchangeably
+    in the experiment runner and visualizer.
+
+    Attributes:
+        problem (PathPlanningProblem): The problem instance to solve.
+        history (OptimizationHistory): Records intermediate paths for visualization.
     """
     def __init__(self, problem: PathPlanningProblem):
         self.problem = problem
@@ -177,4 +338,13 @@ class PathOptimizer(ABC):
 
     @abstractmethod
     def optimize(self, initial_path: Path) -> Path:
+        """
+        Runs the optimization algorithm starting from initial_path.
+
+        Args:
+            initial_path: Starting path (typically a perturbed straight line).
+
+        Returns:
+            Best path found by the algorithm.
+        """
         pass

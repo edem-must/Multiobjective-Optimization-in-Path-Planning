@@ -39,7 +39,32 @@ class GradientDescentOptimizer(PathOptimizer):
     
 class AdamPathOptimizer(PathOptimizer):
     """
-    Gradient-based optimizer using Adam updates on inner waypoints.
+    Gradient-based path optimizer using the Adam update rule.
+
+    Adam is selected over plain gradient descent
+    for its adaptive per-parameter learning rates and momentum, which help
+    navigate the non-convex objective function described in Section 1.3 of
+    the thesis. It combines:
+      - First moment (momentum): smooths gradient direction
+      - Second moment (RMSprop): scales step size per parameter
+
+    The update rule at iteration t (thesis Section 3.2.3):
+        m_t = β1 * m_{t-1} + (1 - β1) * ∇F
+        v_t = β2 * v_{t-1} + (1 - β2) * ∇F²
+        m̂ = m_t / (1 - β1^t)          ← bias correction
+        v̂ = v_t / (1 - β2^t)
+        p ← p - lr * m̂ / (√v̂ + ε)
+
+    Only inner waypoints are updated; start and goal are kept fixed.
+
+    Args:
+        problem:    The path planning problem instance.
+        lr:         Learning rate (step size). Must be on the scale of the map.
+        beta1:      Exponential decay for first moment (default 0.9).
+        beta2:      Exponential decay for second moment (default 0.999).
+        eps:        Numerical stability constant (default 1e-8).
+        max_iters:  Maximum number of gradient steps.
+        tolerance:  Early stopping threshold on the inner gradient norm.
     """
     def __init__(self,
                  problem: PathPlanningProblem,
@@ -58,11 +83,24 @@ class AdamPathOptimizer(PathOptimizer):
         self.tolerance = tolerance
 
     def optimize(self, initial_path: Path) -> Path:
+        """
+        Runs Adam optimization starting from initial_path.
+
+        The initial path must NOT be a perfect straight line because the
+        analytical length gradient (thesis eq. 3.2) cancels to zero for
+        collinear waypoints. A small perturbation must be applied before
+        calling this method (see PathPlanningExperiment.run_gradient).
+
+        Args:
+            initial_path: Starting path with perturbed inner waypoints.
+
+        Returns:
+            Locally optimized path minimizing F(γ) = C1*L + C2*E + C3*R.
+        """
         path = initial_path.copy()
 
-        # moments (same shape as points)
-        m = np.zeros_like(path.points)   # first moment
-        v = np.zeros_like(path.points)   # second raw moment
+        m = np.zeros_like(path.points)
+        v = np.zeros_like(path.points)
 
         t = 0
         for _ in range(self.max_iters):
@@ -104,7 +142,18 @@ class AdamPathOptimizer(PathOptimizer):
 
 class PSOParticle:
     """
-    One particle for PSO: position is a full Path.
+    Represents a single particle in the Particle Swarm Optimization algorithm.
+
+    In the context of path planning, each particle's position is a candidate
+    Path rather than a point in R^n. The particle moves through the space of
+    all possible paths between the fixed start and goal points.
+
+    Attributes:
+        position (Path):        Current candidate path (the particle's location).
+        velocity (np.ndarray):  Per-waypoint velocity, shape (n_points, 2).
+                                Drives how waypoints move between iterations.
+        best_position (Path):   Best path this particle has personally visited.
+        best_value (float):     Objective value at best_position.
     """
     def __init__(self, path: Path):
         self.position = path
@@ -114,7 +163,30 @@ class PSOParticle:
 
 class ParticleSwarmOptimizer(PathOptimizer):
     """
-    Basic single-objective PSO on waypoint positions.
+    Population-based path optimizer using Particle Swarm Optimization (PSO).
+
+    Implements the algorithm described in thesis Section 3.3. Each particle
+    represents a candidate path and updates its trajectory through path-space
+    based on:
+      - Its own inertia (previous velocity)
+      - Cognitive influence: attraction toward its personal best path
+      - Social influence: attraction toward the global best path found by any particle
+
+    Velocity update rule (thesis eq. 3.14):
+        v^{t+1} = ω * v^t
+                + φ_p * R_p * (p_best - x^t)   ← cognitive
+                + φ_g * R_g * (g_best - x^t)   ← social
+
+    Position update (thesis eq. 3.15):
+        x^{t+1} = x^t + v^{t+1}
+
+    Args:
+        problem:     The path planning problem instance.
+        n_particles: Number of particles (candidate paths) in the swarm.
+        max_iters:   Number of swarm iterations.
+        omega:       Inertia weight — controls how much previous velocity persists.
+        phi_p:       Cognitive weight — attraction to particle's own best.
+        phi_g:       Social weight — attraction to swarm's global best.
     """
     def __init__(self,
                  problem: PathPlanningProblem,
@@ -136,8 +208,20 @@ class ParticleSwarmOptimizer(PathOptimizer):
 
     def _random_path_like(self, template: Path) -> Path:
         """
-        Random path with same start/goal and same number of points.
-        Middle points random in map bounds.
+        Creates a randomized candidate path with the same start, goal,
+        and number of waypoints as the template.
+
+        Inner waypoints are initialized as a perturbed straight line
+        (not fully random) to keep particles in a meaningful search region.
+        Fully random initialization causes most particles to start with
+        extremely long paths that push the swarm toward the straight-line
+        solution dominated by the length term.
+
+        Args:
+            template: Reference path providing structure (n_points, start, goal).
+
+        Returns:
+            A new randomized Path between the same start and goal.
         """
         n = template.n_points
         pts = np.zeros_like(template.points)
@@ -156,6 +240,13 @@ class ParticleSwarmOptimizer(PathOptimizer):
         return Path(pts)
 
     def _init_swarm(self, template: Path):
+        """
+        Initializes all particles with random paths and evaluates their
+        starting objective values. Identifies the initial global best.
+
+        Args:
+            template: Reference path for structure (n_points, start, goal).
+        """
         self.particles = []
         self.global_best_path = None
         self.global_best_value = float("inf")
@@ -172,6 +263,23 @@ class ParticleSwarmOptimizer(PathOptimizer):
                 self.global_best_path = p.copy()
 
     def optimize(self, initial_path: Path) -> Path:
+        """
+        Runs PSO to find an optimized path.
+
+        At each iteration every particle updates its velocity toward the
+        personal and global best positions, then moves accordingly.
+        The global best is updated whenever any particle finds a lower
+        objective value.
+
+        Waypoints are clamped to map bounds after each position update
+        to maintain feasibility of candidate solutions.
+
+        Args:
+            initial_path: Used as a structural template for particle initialization.
+
+        Returns:
+            Best path found across all particles and all iterations.
+        """
         self._init_swarm(initial_path)
 
         for it in range(self.max_iters):
