@@ -1,9 +1,13 @@
-# path_planning/render.py
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle, Circle
+from matplotlib.axes import Axes
+import matplotlib.patches as mpatches
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
+
 from .map_elements import GameMap, RectObstacle, CircleObstacle
 from .core import Path, OptimizationHistory
+
 
 class ExperimentRenderer:
     """
@@ -23,10 +27,11 @@ class ExperimentRenderer:
         map (GameMap): The environment to draw. Used to access terrain
                        grid dimensions and the obstacle list.
     """
+
     def __init__(self, game_map: GameMap):
         self.map = game_map
 
-    def draw_map(self, ax):
+    def draw_map(self, ax: Axes):
         """
         Draws the full map background on the given matplotlib Axes.
 
@@ -45,44 +50,63 @@ class ExperimentRenderer:
             ax: The matplotlib Axes to draw on.
         """
         terrain = self.map.terrain
-        # show terrain energy as background image
-        extent = [0, self.map.width, 0, self.map.height]
-        ax.imshow(
+        extent = (0, self.map.width, 0, self.map.height)
+
+        # Draw terrain as a background heatmap
+        # cmap="YlOrBr": yellow (low energy) to brown (high energy)
+        img = ax.imshow(
             np.flipud(terrain.energy_grid),
             extent=extent,
-            cmap="terrain",
-            alpha=0.6
+            cmap="YlOrBr",
+            alpha=0.6,
+            vmin=1.0,
+            vmax=3.0
         )
 
-        # draw obstacles
+        # Add a colorbar so the reader can interpret terrain energy values
+        plt.colorbar(img, ax=ax, fraction=0.03, pad=0.04, label="Terrain energy cost")
+
+        # Draw each obstacle as a filled black shape
         for obs in self.map.obstacles:
             if isinstance(obs, RectObstacle):
-                # rectangle
-                rect = Rectangle(
+                rect = mpatches.Rectangle(
                     (obs.x_min, obs.y_min),
                     obs.x_max - obs.x_min,
                     obs.y_max - obs.y_min,
-                    color="black",
-                    alpha=0.7
+                    linewidth=1,
+                    edgecolor="black",
+                    facecolor="black",
+                    alpha=0.85,
+                    zorder=3   # draw obstacles above terrain but below paths
                 )
                 ax.add_patch(rect)
+
             elif isinstance(obs, CircleObstacle):
-                circ = Circle(
+                circ = mpatches.Circle(
                     tuple(obs.center),
                     obs.radius,
-                    color="black",
-                    alpha=0.7
+                    linewidth=1,
+                    edgecolor="black",
+                    facecolor="black",
+                    alpha=0.85,
+                    zorder=3
                 )
                 ax.add_patch(circ)
 
+        # Configure axes appearance
         ax.set_xlim(0, self.map.width)
         ax.set_ylim(0, self.map.height)
         ax.set_aspect("equal")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.set_title("Path Planning Map")
 
-    def draw_path(self, ax, path: Path, color="blue", alpha=1.0, lw=2.0):
+    def draw_path(self,
+                  ax: Axes,
+                  path: Path,
+                  color: str = "blue",
+                  alpha: float = 1.0,
+                  lw: float = 2.0,
+                  label: str | None = None):
         """
         Draws a single path as a polyline with start and goal markers.
 
@@ -99,14 +123,29 @@ class ExperimentRenderer:
             label: Optional legend label for this path.
         """
         pts = path.points
-        ax.plot(pts[:, 0], pts[:, 1], color=color, alpha=alpha, lw=lw)
-        ax.scatter(pts[0, 0], pts[0, 1], c="green", marker="o", s=50)  # start
-        ax.scatter(pts[-1, 0], pts[-1, 1], c="red", marker="x", s=50)  # goal
 
-    def draw_history(self, ax, history: OptimizationHistory,
-                     color="purple",
-                     alpha_start=0.1,
-                     alpha_end=0.6):
+        # Draw the path polyline
+        ax.plot(pts[:, 0], pts[:, 1],
+                color=color, alpha=alpha, lw=lw,
+                label=label, zorder=4)
+
+        # Start marker: green filled circle
+        ax.scatter(pts[0, 0], pts[0, 1],
+                   c="green", marker="o", s=80,
+                   zorder=5, label="Start" if label else None)
+
+        # Goal marker: red cross
+        ax.scatter(pts[-1, 0], pts[-1, 1],
+                   c="red", marker="X", s=80,
+                   zorder=5, label="Goal" if label else None)
+
+    def draw_history(self,
+                     ax: Axes,
+                     history: OptimizationHistory,
+                     color: str = "purple",
+                     alpha_start: float = 0.05,
+                     alpha_end: float = 0.5,
+                     stride: int = 5):
         """
         Draws the algorithm workflow by replaying intermediate paths.
 
@@ -127,9 +166,42 @@ class ExperimentRenderer:
             alpha_end:   Opacity of the latest recorded path.
             stride:      Only draw every nth path to keep rendering fast.
         """
-        n = len(history.paths)
+        paths = history.paths[::stride]   # subsample for performance
+        n = len(paths)
         if n == 0:
             return
-        for i, path in enumerate(history.paths):
+
+        for i, path in enumerate(paths):
+            # Linearly interpolate opacity from faint (early) to visible (late)
             alpha = alpha_start + (alpha_end - alpha_start) * (i / max(1, n - 1))
-            self.draw_path(ax, path, color=color, alpha=alpha, lw=1.0)
+            pts = path.points
+            ax.plot(pts[:, 0], pts[:, 1],
+                    color=color, alpha=alpha, lw=0.8,
+                    zorder=2)   # draw workflow below the final path
+
+    def draw_objective_curve(self, ax: Axes,
+                              history: OptimizationHistory,
+                              color: str = "blue",
+                              label: str = "F(γ)"):
+        """
+        Draws the convergence curve of the objective function F(γ) over iterations.
+
+        Plots objective value against iteration number on a provided Axes.
+        This is useful for the results chapter of the thesis to compare
+        convergence speed between the gradient method and PSO.
+
+        Args:
+            ax:      The matplotlib Axes to draw on (typically a separate subplot).
+            history: OptimizationHistory whose objective_values list is plotted.
+            color:   Line color for this algorithm's convergence curve.
+            label:   Legend label (e.g. "Adam" or "PSO").
+        """
+        if not history.objective_values:
+            return
+
+        ax.plot(history.objective_values, color=color, lw=1.5, label=label)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("F(γ)")
+        ax.set_title("Objective convergence")
+        ax.legend()
+        ax.grid(True, alpha=0.3)

@@ -39,7 +39,7 @@ class PathPlanningExperiment:
             goal=self.goal,
             c1=1.0,
             c2=0.0,
-            c3=0.0
+            c3=0.1
         )
 
     def _create_default_map(self) -> map.GameMap:
@@ -110,13 +110,37 @@ class PathPlanningExperiment:
             paths for visualization of the gradient descent workflow.
         """
         initial = self.create_initial_path()
-        # break straight-line symmetry before Adam starts
-        noise = np.random.uniform(-8.0, 8.0, initial.points[1:-1].shape)
-        initial.points[1:-1] += noise
+        n = initial.n_points
+
+        # Perturb perpendicular to the start→goal direction
+        # This biases the path toward one side of the obstacle
+        # rather than sending waypoints randomly in all directions
+        if self.problem.c3 != 0:
+            direction = self.goal - self.start
+            direction /= np.linalg.norm(direction)
+            perp = np.array([-direction[1], direction[0]])  # 90° rotation
+
+            for i in range(1, n - 1):
+                t = i / (n - 1)
+                scale = np.sin(t * np.pi)
+                # Small perpendicular nudge + tiny random component
+                magnitude = np.random.uniform(2.0, 5.0) + scale # was ±8.0
+                initial.points[i] += perp * magnitude
+
         initial.points[1:-1, 0] = np.clip(initial.points[1:-1, 0], 0, self.game_map.width)
         initial.points[1:-1, 1] = np.clip(initial.points[1:-1, 1], 0, self.game_map.height)
+
         opt = optimize.AdamPathOptimizer(self.problem)
         return opt.optimize(initial), opt.history
+
+        #initial = self.create_initial_path()
+        ## break straight-line symmetry before Adam starts
+        #noise = np.random.uniform(-8.0, 8.0, initial.points[1:-1].shape)
+        #initial.points[1:-1] += noise
+        #initial.points[1:-1, 0] = np.clip(initial.points[1:-1, 0], 0, self.game_map.width)
+        #initial.points[1:-1, 1] = np.clip(initial.points[1:-1, 1], 0, self.game_map.height)
+        #opt = optimize.AdamPathOptimizer(self.problem)
+        #return opt.optimize(initial), opt.history
 
 
     def run_pso(self) -> Tuple[path.Path, path.OptimizationHistory]:

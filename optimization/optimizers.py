@@ -191,7 +191,7 @@ class ParticleSwarmOptimizer(PathOptimizer):
     def __init__(self,
                  problem: PathPlanningProblem,
                  n_particles: int = 50,
-                 max_iters: int = 2000,
+                 max_iters: int = 500,
                  omega: float = 0.4,
                  phi_p: float = 1.0,
                  phi_g: float = 1.0):
@@ -262,6 +262,35 @@ class ParticleSwarmOptimizer(PathOptimizer):
                 self.global_best_value = val
                 self.global_best_path = p.copy()
 
+    def _reorder_waypoints(self, path: Path):
+        """
+        Re-sorts inner waypoints by their projection onto the start→goal
+        axis. This prevents waypoints from crossing each other and forming
+        loops while still allowing them to deviate sideways freely.
+        """
+        pts = path.points
+        start = pts[0]
+        goal  = pts[-1]
+
+        direction = goal - start
+        direction = direction / (np.linalg.norm(direction) + 1e-8)
+
+        # Project each inner waypoint onto the start→goal axis
+        projections = [
+            np.dot(pts[i] - start, direction)
+            for i in range(1, path.n_points - 1)
+        ]
+
+        # Sort inner waypoints by their projection value
+        inner_sorted = sorted(
+            zip(projections, pts[1:-1]),
+            key=lambda x: x[0]
+        )
+
+        for i, (_, p) in enumerate(inner_sorted):
+            path.points[i + 1] = p
+
+
     def optimize(self, initial_path: Path) -> Path:
         """
         Runs PSO to find an optimized path.
@@ -315,6 +344,8 @@ class ParticleSwarmOptimizer(PathOptimizer):
 
                 particle.velocity = v
                 particle.position.points = x_new
+
+                self._reorder_waypoints(particle.position)
 
                 val = self.problem.objective(particle.position)
 
