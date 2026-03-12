@@ -137,71 +137,111 @@ class PathPlanningProblem:
 
     def objective(self, path: Path) -> float:
         """
-        Evaluates the full weighted composite objective F(γ) (thesis eq. 1.1):
+        Evaluates the weighted composite objective F(γ) = C1*L + C2*E + C3*R.
 
-            F(γ) = C1 * L(γ) + C2 * E(γ) + C3 * R(γ)
-
-        This is the function that all optimization algorithms minimize.
-
-        Args:
-            path: The path to evaluate.
-
-        Returns:
-            Scalar objective value.
+        Components whose weight is zero are skipped entirely to avoid
+        unnecessary computation — e.g. if c3=0, the risk field (which
+        involves iterating over all obstacle distances for every segment
+        sample) is never evaluated.
         """
-        return (self.c1 * self.path_length(path) +
-                self.c2 * self.path_energy(path) +
-                self.c3 * self.path_risk(path))
+        result = 0.0
+
+        if self.c1 != 0:
+            result += self.c1 * self.path_length(path)
+
+        if self.c2 != 0:
+            result += self.c2 * self.path_energy(path)
+
+        if self.c3 != 0:
+            result += self.c3 * self.path_risk(path)
+
+        return result
 
     def gradient(self, path: Path) -> np.ndarray:
         """
-        Computes the gradient ∇F of the objective with respect to all inner
-        waypoints p_1, ..., p_{n-2}. The start and goal gradients are fixed
-        at zero since those points are never moved.
+        Computes ∇F with respect to inner waypoints.
 
-        The total gradient is a linear combination (thesis eq. 3.5):
-            ∇F = C1 * ∇L + C2 * ∇E + C3 * ∇R
-
-        Each component is computed differently:
-          - ∇L: analytical (thesis eq. 3.2)
-          - ∇E: numerical finite differences (terrain is smooth, this is sufficient)
-          - ∇R: analytical + segment-weighted chain rule (see risk_gradient_at_waypoint)
-
-        Args:
-            path: Current path whose inner waypoints are being optimized.
-
-        Returns:
-            np.ndarray of shape (n_points, 2). Rows 0 and n-1 are always zero.
+        Gradient components for zero-weighted terms are skipped — their
+        contribution to ∇F is identically zero, so computing them wastes
+        time without affecting the optimizer's update step.
         """
         n = path.n_points
         grad = np.zeros_like(path.points)
 
         for i in range(1, n - 1):
-            pi = path.points[i]
+            pi     = path.points[i]
             p_prev = path.points[i - 1]
             p_next = path.points[i + 1]
 
-            # Analytical length gradient (thesis eq. 3.2):
-            # Two unit vectors from pi toward its neighbors, summed.
-            # On a straight-line path these cancel → zero → initial path
-            # must be perturbed before running the optimizer.
-            v1 = pi - p_prev
-            v2 = pi - p_next
-            gL = v1 / (np.linalg.norm(v1) + 1e-8) + \
-                v2 / (np.linalg.norm(v2) + 1e-8)
+            g = np.zeros(2)
 
-            # Numerical gradient for energy (finite differences).
-            # Terrain is stored as a smooth bilinear grid so this is accurate.
-            gE = self._numerical_gradient_single_point(path, i, self.path_energy)
+            if self.c1 != 0:
+                v1 = pi - p_prev
+                v2 = pi - p_next
+                gL = (v1 / (np.linalg.norm(v1) + 1e-8) + v2 / (np.linalg.norm(v2) + 1e-8))
+                g += self.c1 * gL
 
-            # Analytical segment-consistent risk gradient.
-            # This accounts for all sample points on adjacent segments
-            # that are influenced by moving waypoint i.
-            gR = self.risk_gradient_at_waypoint(path, i)
+            if self.c2 != 0:
+                gE = self._numerical_gradient_single_point(path, i, self.path_energy)
+                g += self.c2 * gE
 
-            grad[i] = self.c1 * gL + self.c2 * gE + self.c3 * gR
+            if self.c3 != 0:
+                gR = self.risk_gradient_at_waypoint(path, i)
+                g += self.c3 * gR
+
+            grad[i] = g
 
         return grad
+
+    # def gradient(self, path: Path) -> np.ndarray:
+    #     """
+    #     Computes the gradient ∇F of the objective with respect to all inner
+    #     waypoints p_1, ..., p_{n-2}. The start and goal gradients are fixed
+    #     at zero since those points are never moved.
+
+    #     The total gradient is a linear combination (thesis eq. 3.5):
+    #         ∇F = C1 * ∇L + C2 * ∇E + C3 * ∇R
+
+    #     Each component is computed differently:
+    #       - ∇L: analytical (thesis eq. 3.2)
+    #       - ∇E: numerical finite differences (terrain is smooth, this is sufficient)
+    #       - ∇R: analytical + segment-weighted chain rule (see risk_gradient_at_waypoint)
+
+    #     Args:
+    #         path: Current path whose inner waypoints are being optimized.
+
+    #     Returns:
+    #         np.ndarray of shape (n_points, 2). Rows 0 and n-1 are always zero.
+    #     """
+    #     n = path.n_points
+    #     grad = np.zeros_like(path.points)
+
+    #     for i in range(1, n - 1):
+    #         pi = path.points[i]
+    #         p_prev = path.points[i - 1]
+    #         p_next = path.points[i + 1]
+
+    #         # Analytical length gradient (thesis eq. 3.2):
+    #         # Two unit vectors from pi toward its neighbors, summed.
+    #         # On a straight-line path these cancel → zero → initial path
+    #         # must be perturbed before running the optimizer.
+    #         v1 = pi - p_prev
+    #         v2 = pi - p_next
+    #         gL = v1 / (np.linalg.norm(v1) + 1e-8) + \
+    #             v2 / (np.linalg.norm(v2) + 1e-8)
+
+    #         # Numerical gradient for energy (finite differences).
+    #         # Terrain is stored as a smooth bilinear grid so this is accurate.
+    #         gE = self._numerical_gradient_single_point(path, i, self.path_energy)
+
+    #         # Analytical segment-consistent risk gradient.
+    #         # This accounts for all sample points on adjacent segments
+    #         # that are influenced by moving waypoint i.
+    #         gR = self.risk_gradient_at_waypoint(path, i)
+
+    #         grad[i] = self.c1 * gL + self.c2 * gE + self.c3 * gR
+
+    #     return grad
     
     def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
         """

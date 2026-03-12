@@ -180,28 +180,65 @@ class ExperimentRenderer:
                     zorder=2)   # draw workflow below the final path
 
     def draw_objective_curve(self, ax: Axes,
-                              history: OptimizationHistory,
-                              color: str = "blue",
-                              label: str = "F(γ)"):
+                          history: OptimizationHistory,
+                          color: str = "blue",
+                          label: str = "F(γ)"):
         """
-        Draws the convergence curve of the objective function F(γ) over iterations.
+        Draws the convergence curve of F(γ) over iterations on a log scale.
 
-        Plots objective value against iteration number on a provided Axes.
-        This is useful for the results chapter of the thesis to compare
-        convergence speed between the gradient method and PSO.
-
-        Args:
-            ax:      The matplotlib Axes to draw on (typically a separate subplot).
-            history: OptimizationHistory whose objective_values list is plotted.
-            color:   Line color for this algorithm's convergence curve.
-            label:   Legend label (e.g. "Adam" or "PSO").
+        A logarithmic Y-axis is used because the objective typically drops
+        by several orders of magnitude in early iterations — on a linear
+        scale this compresses all fine convergence behavior into a flat line.
+        Log scale makes both the initial fast drop and the late slow
+        fine-tuning visible simultaneously.
         """
         if not history.objective_values:
             return
 
-        ax.plot(history.objective_values, color=color, lw=1.5, label=label)
+        values = history.objective_values
+
+        ax.plot(values, color=color, lw=1.5, label=label)
+
+        # Use log scale only if the value range justifies it
+        # (at least one order of magnitude difference between max and min)
+        if max(values) > 0 and min(values) > 0:
+            value_range = max(values) / min(values)
+            if value_range > 10:
+                ax.set_yscale("log")
+                ax.set_ylabel("F(γ)  [log scale]")
+            else:
+                ax.set_ylabel("F(γ)")
+        else:
+            ax.set_ylabel("F(γ)")
+
         ax.set_xlabel("Iteration")
-        ax.set_ylabel("F(γ)")
         ax.set_title("Objective convergence")
         ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.grid(True, which="both", alpha=0.3)   # "both" shows minor grid on log scale
+
+    # def draw_objective_curve(self, ax: Axes,
+    #                           history: OptimizationHistory,
+    #                           color: str = "blue",
+    #                           label: str = "F(γ)"):
+    #     """
+    #     Draws the convergence curve of the objective function F(γ) over iterations.
+
+    #     Plots objective value against iteration number on a provided Axes.
+    #     This is useful for the results chapter of the thesis to compare
+    #     convergence speed between the gradient method and PSO.
+
+    #     Args:
+    #         ax:      The matplotlib Axes to draw on (typically a separate subplot).
+    #         history: OptimizationHistory whose objective_values list is plotted.
+    #         color:   Line color for this algorithm's convergence curve.
+    #         label:   Legend label (e.g. "Adam" or "PSO").
+    #     """
+    #     if not history.objective_values:
+    #         return
+
+    #     ax.plot(history.objective_values, color=color, lw=1.5, label=label)
+    #     ax.set_xlabel("Iteration")
+    #     ax.set_ylabel("F(γ)")
+    #     ax.set_title("Objective convergence")
+    #     ax.legend()
+    #     ax.grid(True, alpha=0.3)
