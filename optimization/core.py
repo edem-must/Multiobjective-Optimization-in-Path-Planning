@@ -52,6 +52,11 @@ class PathPlanningProblem:
         start (np.ndarray):   Start point A = [x, y].
         goal (np.ndarray):    Goal point B = [x, y].
         c1, c2, c3 (float):   Objective weights for length, energy, and risk.
+        risk_mode (str): Selects the collision risk formulation:
+            "khatib"   — Khatib repulsion potential (default, eq. 1.5).
+                         Provides non-zero gradient everywhere within d0.
+            "original" — Original inverse-square formula (eq. 1.4).
+                         Collapses near obstacles; kept for testing only.
     """
     def __init__(self,
                  game_map: "GameMap",
@@ -59,13 +64,15 @@ class PathPlanningProblem:
                  goal: np.ndarray,
                  c1: float,
                  c2: float,
-                 c3: float):
+                 c3: float,
+                 risk_mode: str = "khatib"):
         self.map = game_map
         self.start = start
         self.goal = goal
         self.c1 = c1
         self.c2 = c2
         self.c3 = c3
+        self.risk_mode = risk_mode
 
     def path_length(self, path: Path) -> float:
         """
@@ -101,37 +108,63 @@ class PathPlanningProblem:
         energies = [self.map.energy_at(p) for p in path.points]
         return float(np.sum(energies))
 
+    # def path_risk(self, path: Path) -> float:
+    #     """
+    #     Computes the cumulative collision risk R(γ) using segment sampling.
+
+    #     Unlike a naive implementation that only evaluates risk at discrete
+    #     waypoints, this method interpolates additional sample points along
+    #     each segment p_i → p_{i+1}. This ensures that obstacle crossings
+    #     between waypoints are detected and penalized.
+
+    #     The risk at each sample uses a Khatib-style repulsion potential:
+    #         U(d) = 0.5 * (1/d - 1/d_0)²   if d < d_0
+    #                0                          otherwise
+    #     where d is the distance to the nearest obstacle and d_0 is the
+    #     influence radius.
+
+    #     Args:
+    #         path: The path to evaluate.
+
+    #     Returns:
+    #         Scalar total risk.
+    #     """
+    #     total = 0.0
+    #     n = path.n_points
+    #     samples_per_segment = 5   # interpolate between each pair of waypoints
+
+    #     for i in range(n - 1):
+    #         for t in np.linspace(0, 1, samples_per_segment, endpoint=False):
+    #             p = (1 - t) * path.points[i] + t * path.points[i + 1]
+    #             total += self.map.collision_risk_at(p)
+
+    #     total += self.map.collision_risk_at(path.points[-1])
+    #     return total
+
     def path_risk(self, path: Path) -> float:
         """
-        Computes the cumulative collision risk R(γ) using segment sampling.
+        Computes cumulative collision risk along the path using
+        segment sampling (10 points per segment).
 
-        Unlike a naive implementation that only evaluates risk at discrete
-        waypoints, this method interpolates additional sample points along
-        each segment p_i → p_{i+1}. This ensures that obstacle crossings
-        between waypoints are detected and penalized.
-
-        The risk at each sample uses a Khatib-style repulsion potential:
-            U(d) = 0.5 * (1/d - 1/d_0)²   if d < d_0
-                   0                          otherwise
-        where d is the distance to the nearest obstacle and d_0 is the
-        influence radius.
-
-        Args:
-            path: The path to evaluate.
-
-        Returns:
-            Scalar total risk.
+        Delegates to either the Khatib potential or the original
+        inverse-square formula depending on self.risk_mode.
         """
         total = 0.0
         n = path.n_points
-        samples_per_segment = 5   # interpolate between each pair of waypoints
+        samples_per_segment = 10
+
+        # Select the correct point-wise risk function
+        if self.risk_mode == "original":
+            risk_fn = self.map.collision_risk_original_at
+        else:
+            risk_fn = self.map.collision_risk_at
 
         for i in range(n - 1):
             for t in np.linspace(0, 1, samples_per_segment, endpoint=False):
                 p = (1 - t) * path.points[i] + t * path.points[i + 1]
-                total += self.map.collision_risk_at(p)
+                total += risk_fn(p)
 
-        total += self.map.collision_risk_at(path.points[-1])
+        total += risk_fn(path.points[-1])
         return total
 
 
@@ -243,50 +276,79 @@ class PathPlanningProblem:
 
     #     return grad
     
+    # def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
+    #     """
+    #     Computes the gradient of the segment-sampled risk with respect to a
+    #     single waypoint p_index, consistent with path_risk().
+
+    #     Moving waypoint p_i shifts all interpolated sample points on the two
+    #     adjacent segments. By the chain rule:
+    #       - On segment [p_{i-1}, p_i]: sample s(t) = (1-t)*p_{i-1} + t*p_i
+    #         so ∂s/∂p_i = t
+    #       - On segment [p_i, p_{i+1}]: sample s(t) = (1-t)*p_i + t*p_{i+1}
+    #         so ∂s/∂p_i = (1-t)
+
+    #     The risk gradient at each sample is provided analytically by the map
+    #     (via obstacle distance_and_gradient methods), ensuring correctness
+    #     even when samples are inside or near obstacle boundaries.
+
+    #     Args:
+    #         path:  Current path.
+    #         index: Index of the waypoint to differentiate with respect to.
+
+    #     Returns:
+    #         np.ndarray of shape (2,) — gradient vector at this waypoint.
+    #     """
+    #     samples = 10   # same resolution as path_risk
+    #     grad = np.zeros(2)
+    #     pts = path.points
+    #     n = path.n_points
+
+    #     # contribution from segment [p_{index-1}, p_{index}]
+    #     if index > 0:
+    #         for t in np.linspace(0, 1, samples, endpoint=False):
+    #             s = (1 - t) * pts[index - 1] + t * pts[index]
+    #             g = self.map.collision_risk_gradient_at(s)
+    #             grad += t * g          # chain rule: ds/dp_i = t
+
+    #     # contribution from segment [p_{index}, p_{index+1}]
+    #     if index < n - 1:
+    #         for t in np.linspace(0, 1, samples, endpoint=False):
+    #             s = (1 - t) * pts[index] + t * pts[index + 1]
+    #             g = self.map.collision_risk_gradient_at(s)
+    #             grad += (1 - t) * g   # chain rule: ds/dp_i = (1-t)
+
+    #     return grad
+
     def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
         """
-        Computes the gradient of the segment-sampled risk with respect to a
-        single waypoint p_index, consistent with path_risk().
+        Gradient of the segment-sampled risk w.r.t. waypoint at index.
 
-        Moving waypoint p_i shifts all interpolated sample points on the two
-        adjacent segments. By the chain rule:
-          - On segment [p_{i-1}, p_i]: sample s(t) = (1-t)*p_{i-1} + t*p_i
-            so ∂s/∂p_i = t
-          - On segment [p_i, p_{i+1}]: sample s(t) = (1-t)*p_i + t*p_{i+1}
-            so ∂s/∂p_i = (1-t)
-
-        The risk gradient at each sample is provided analytically by the map
-        (via obstacle distance_and_gradient methods), ensuring correctness
-        even when samples are inside or near obstacle boundaries.
-
-        Args:
-            path:  Current path.
-            index: Index of the waypoint to differentiate with respect to.
-
-        Returns:
-            np.ndarray of shape (2,) — gradient vector at this waypoint.
+        Delegates gradient computation to either the Khatib or original
+        formula depending on self.risk_mode.
         """
-        samples = 10   # same resolution as path_risk
+        samples = 10
         grad = np.zeros(2)
         pts = path.points
         n = path.n_points
 
-        # contribution from segment [p_{index-1}, p_{index}]
+        # Select the correct gradient function
+        if self.risk_mode == "original":
+            grad_fn = self.map.collision_risk_gradient_original_at
+        else:
+            grad_fn = self.map.collision_risk_gradient_at
+
         if index > 0:
             for t in np.linspace(0, 1, samples, endpoint=False):
                 s = (1 - t) * pts[index - 1] + t * pts[index]
-                g = self.map.collision_risk_gradient_at(s)
-                grad += t * g          # chain rule: ds/dp_i = t
+                grad += t * grad_fn(s)
 
-        # contribution from segment [p_{index}, p_{index+1}]
         if index < n - 1:
             for t in np.linspace(0, 1, samples, endpoint=False):
                 s = (1 - t) * pts[index] + t * pts[index + 1]
-                g = self.map.collision_risk_gradient_at(s)
-                grad += (1 - t) * g   # chain rule: ds/dp_i = (1-t)
+                grad += (1 - t) * grad_fn(s)
 
         return grad
-
 
     def _numerical_gradient_single_point(
         self,

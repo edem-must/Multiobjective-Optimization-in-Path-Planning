@@ -122,7 +122,8 @@ class PathPlanningExperiment:
             goal=self.goal,
             c1=1.0,
             c2=0.0,
-            c3=0.1
+            c3=1.0, 
+            risk_mode="original"
         )
 
     def _create_default_map(self) -> map.GameMap:

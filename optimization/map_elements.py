@@ -115,6 +115,48 @@ class GameMap:
         # ∂U/∂p = -(1/d - 1/d0) * (1/d^2) * ∂d/∂p
         scalar = -((1.0 / d_safe) - (1.0 / influence_radius)) / (d_safe ** 2)
         return scalar * best_grad_dir
+    
+    def collision_risk_original_at(self, point: np.ndarray) -> float:
+        """
+        Original risk function from thesis eq. 1.4 (pre-Khatib version):
+
+            U(d) = 1 / (||p - t||² + ε)
+
+        where d is the distance to the nearest obstacle and ε is a small
+        smoothing constant that prevents division by zero.
+
+        Kept for experimental comparison against the Khatib potential.
+        Use PathPlanningProblem(risk_mode="original") to activate this.
+        """
+        d = self.nearest_obstacle_distance(point)
+        return 1.0 / (d ** 2 + self.risk_epsilon)
+
+    def collision_risk_gradient_original_at(self, point: np.ndarray) -> np.ndarray:
+        """
+        Analytical gradient of the original risk function (thesis eq. 3.4,
+        original formulation before replacement with Khatib potential):
+
+            ∂U/∂p = -2(p - t) / (||p - t||² + ε)²
+
+        where (p - t) is the vector from the nearest obstacle surface
+        toward the point, provided by distance_and_gradient().
+
+        Note: this gradient is near-zero at practical distances and collapses
+        to zero inside obstacles — the main reason the Khatib potential
+        was adopted instead. This method exists for experimental testing only.
+        """
+        best_dist = float("inf")
+        best_grad_dir = np.zeros(2)
+
+        for obs in self.obstacles:
+            d, grad_dir = obs.distance_and_gradient(point)
+            if d < best_dist:
+                best_dist = d
+                best_grad_dir = grad_dir
+
+        denom = (best_dist ** 2 + self.risk_epsilon) ** 2
+        # Chain rule: ∂(1/(d²+ε))/∂p = -2d * (∂d/∂p) / (d²+ε)²
+        return -2.0 * best_dist * best_grad_dir / denom
 
 class TerrainField:
     """
