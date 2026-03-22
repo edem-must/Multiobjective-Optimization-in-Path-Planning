@@ -190,7 +190,7 @@ class ParticleSwarmOptimizer(PathOptimizer):
     """
     def __init__(self,
                  problem: PathPlanningProblem,
-                 n_particles: int = 50,
+                 n_particles: int = 30,
                  max_iters: int = 500,
                  omega: float = 0.4,
                  phi_p: float = 1.0,
