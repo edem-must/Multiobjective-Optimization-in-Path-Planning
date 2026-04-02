@@ -30,6 +30,7 @@ class AlgorithmResult:
         self.best_path: Path | None = None
         self.history: OptimizationHistory | None = None
         self.elapsed_time: float = 0.0
+        self.total_iters: int = 0
 
     def print_summary(self, problem: PathPlanningProblem):
         if self.best_path is None:
@@ -37,7 +38,8 @@ class AlgorithmResult:
             return
 
         F     = problem.objective(self.best_path)
-        iters = len(self.history.paths) if self.history else 0
+        iters = self.total_iters if self.total_iters > 0 \
+                else (len(self.history.paths) if self.history else 0)
 
         print(f"\n{'─' * 45}")
         print(f"  {self.algorithm_name}")
@@ -59,33 +61,6 @@ class AlgorithmResult:
         print(f"  Iterations = {iters}")
         print(f"  Time       = {self.elapsed_time:.3f} s")
         print(f"{'─' * 45}")
-
-
-    # def print_summary(self, problem: PathPlanningProblem):
-    #     """
-    #     Prints a formatted summary of the result to stdout including
-    #     all three objective components and total wall-clock time.
-    #     """
-    #     if self.best_path is None:
-    #         print(f"[{self.algorithm_name}] No result.")
-    #         return
-
-    #     L = problem.path_length(self.best_path)
-    #     E = problem.path_energy(self.best_path)
-    #     R = problem.path_risk(self.best_path)
-    #     F = problem.objective(self.best_path)
-    #     iters = len(self.history.paths) if self.history else 0
-
-    #     print(f"\n{'─' * 45}")
-    #     print(f"  {self.algorithm_name}")
-    #     print(f"{'─' * 45}")
-    #     print(f"  L(γ)        = {L:.4f}  (path length)")
-    #     print(f"  E(γ)        = {E:.4f}  (terrain energy)")
-    #     print(f"  R(γ)        = {R:.6f}  (collision risk)")
-    #     print(f"  F(γ)        = {F:.4f}  (total objective)")
-    #     print(f"  Iterations  = {iters}")
-    #     print(f"  Time        = {self.elapsed_time:.3f} s")
-    #     print(f"{'─' * 45}")
 
 class PathPlanningExperiment:
     """
@@ -120,9 +95,9 @@ class PathPlanningExperiment:
             game_map=self.game_map,
             start=self.start,
             goal=self.goal,
-            c1=1.0,
-            c2=0.0,
-            c3=1.0, 
+            c1=0.0,
+            c2=1.0,
+            c3=0.0, 
             risk_mode="original"
         )
 
@@ -180,52 +155,6 @@ class PathPlanningExperiment:
         points = np.stack([xs, ys], axis=1)
         return path.Path(points)
 
-    # def run_gradient(self)-> Tuple[path.Path, path.OptimizationHistory]:
-    #     """
-    #     Runs the Adam gradient-based optimizer.
-
-    #     Before optimization, inner waypoints are randomly perturbed. This
-    #     is necessary because the analytical length gradient (thesis eq. 3.2)
-    #     is identically zero on a perfectly straight path (opposing unit
-    #     vectors cancel), causing Adam to stall at iteration 1.
-
-    #     Returns:
-    #         Tuple (best_path, history) where history contains all intermediate
-    #         paths for visualization of the gradient descent workflow.
-    #     """
-    #     initial = self.create_initial_path()
-    #     n = initial.n_points
-
-    #     # Perturb perpendicular to the start→goal direction
-    #     # This biases the path toward one side of the obstacle
-    #     # rather than sending waypoints randomly in all directions
-    #     if self.problem.c3 != 0:
-    #         direction = self.goal - self.start
-    #         direction /= np.linalg.norm(direction)
-    #         perp = np.array([-direction[1], direction[0]])  # 90° rotation
-
-    #         for i in range(1, n - 1):
-    #             t = i / (n - 1)
-    #             scale = np.sin(t * np.pi)
-    #             # Small perpendicular nudge + tiny random component
-    #             magnitude = np.random.uniform(2.0, 5.0) + scale # was ±8.0
-    #             initial.points[i] += perp * magnitude
-
-    #     initial.points[1:-1, 0] = np.clip(initial.points[1:-1, 0], 0, self.game_map.width)
-    #     initial.points[1:-1, 1] = np.clip(initial.points[1:-1, 1], 0, self.game_map.height)
-
-    #     opt = optimize.AdamPathOptimizer(self.problem)
-    #     return opt.optimize(initial), opt.history
-
-        #initial = self.create_initial_path()
-        ## break straight-line symmetry before Adam starts
-        #noise = np.random.uniform(-8.0, 8.0, initial.points[1:-1].shape)
-        #initial.points[1:-1] += noise
-        #initial.points[1:-1, 0] = np.clip(initial.points[1:-1, 0], 0, self.game_map.width)
-        #initial.points[1:-1, 1] = np.clip(initial.points[1:-1, 1], 0, self.game_map.height)
-        #opt = optimize.AdamPathOptimizer(self.problem)
-        #return opt.optimize(initial), opt.history
-
     def _run_gradient_into(self, result: AlgorithmResult, n_restarts: int = 5):
         """
         Target function for the gradient thread.
@@ -247,6 +176,7 @@ class PathPlanningExperiment:
         best_path = None
         best_history = None
         best_value = float("inf")
+        total_iters = 0
 
         direction = self.goal - self.start
         direction /= np.linalg.norm(direction)
@@ -274,6 +204,7 @@ class PathPlanningExperiment:
             opt = optimize.AdamPathOptimizer(self.problem)
             candidate = opt.optimize(initial)
             value = self.problem.objective(candidate)
+            total_iters += len(opt.history.paths)
 
             # Keep this run if it produced a better solution
             if value < best_value or (
@@ -289,6 +220,7 @@ class PathPlanningExperiment:
         result.best_path = best_path
         result.history = best_history
         result.elapsed_time = t_end - t_start
+        result.total_iters = total_iters
 
 
     def _run_pso_into(self, result: AlgorithmResult):
@@ -313,23 +245,6 @@ class PathPlanningExperiment:
         result.best_path = best_path
         result.history = opt.history
         result.elapsed_time = t_end - t_start
-
-    # def run_pso(self) -> Tuple[path.Path, path.OptimizationHistory]:
-    #     """
-    #     Runs the Particle Swarm Optimizer.
-
-    #     Uses the straight-line path only as a structural template. The
-    #     actual initial positions of PSO particles are independently
-    #     randomized around the straight line in _random_path_like.
-
-    #     Returns:
-    #         Tuple (best_path, history) where history records the global
-    #         best path at each iteration for workflow visualization.
-    #     """
-    #     initial = self.create_initial_path()
-    #     opt = optimize.ParticleSwarmOptimizer(self.problem)
-    #     best_path = opt.optimize(initial)
-    #     return best_path, opt.history
 
     def run_parallel(self) -> Tuple[AlgorithmResult, AlgorithmResult]:
         """

@@ -92,54 +92,40 @@ class PathPlanningProblem:
 
     def path_energy(self, path: Path) -> float:
         """
-        Computes the cumulative terrain energy cost E(γ) (thesis eq. 1.3):
+        Computes arc-length-weighted terrain energy E(γ) using segment sampling.
 
-            E(γ) = Σ e(γ_i)
+        Instead of summing energy only at discrete waypoints, this method
+        samples 10 points per segment and weights each segment's energy
+        by its Euclidean length. This ensures:
+        - A long segment through a swamp costs proportionally more than
+            a short one, even if both have the same number of waypoints.
+        - The gradient signal pushes waypoints toward lower-cost terrain
+            rather than stalling in the interior of a high-cost zone.
 
-        where e(p) is the terrain energy at position p, provided by the map's
-        TerrainField via bilinear interpolation of the energy grid.
+        E(γ) = Σ_i ||p_{i+1} - p_i|| * mean(e(samples on segment i))
 
         Args:
             path: The path to evaluate.
 
         Returns:
-            Scalar total energy consumption.
+            Scalar total arc-length-weighted energy.
         """
-        energies = [self.map.energy_at(p) for p in path.points]
-        return float(np.sum(energies))
+        total = 0.0
+        samples_per_segment = 10
 
-    # def path_risk(self, path: Path) -> float:
-    #     """
-    #     Computes the cumulative collision risk R(γ) using segment sampling.
+        for i in range(path.n_points - 1):
+            p0 = path.points[i]
+            p1 = path.points[i + 1]
+            seg_len = float(np.linalg.norm(p1 - p0))
 
-    #     Unlike a naive implementation that only evaluates risk at discrete
-    #     waypoints, this method interpolates additional sample points along
-    #     each segment p_i → p_{i+1}. This ensures that obstacle crossings
-    #     between waypoints are detected and penalized.
+            seg_energy = 0.0
+            for t in np.linspace(0, 1, samples_per_segment):
+                p = (1.0 - t) * p0 + t * p1
+                seg_energy += float(self.map.energy_at(p))
 
-    #     The risk at each sample uses a Khatib-style repulsion potential:
-    #         U(d) = 0.5 * (1/d - 1/d_0)²   if d < d_0
-    #                0                          otherwise
-    #     where d is the distance to the nearest obstacle and d_0 is the
-    #     influence radius.
+            total += seg_len * seg_energy / samples_per_segment
 
-    #     Args:
-    #         path: The path to evaluate.
-
-    #     Returns:
-    #         Scalar total risk.
-    #     """
-    #     total = 0.0
-    #     n = path.n_points
-    #     samples_per_segment = 5   # interpolate between each pair of waypoints
-
-    #     for i in range(n - 1):
-    #         for t in np.linspace(0, 1, samples_per_segment, endpoint=False):
-    #             p = (1 - t) * path.points[i] + t * path.points[i + 1]
-    #             total += self.map.collision_risk_at(p)
-
-    #     total += self.map.collision_risk_at(path.points[-1])
-    #     return total
+        return total
 
     def path_risk(self, path: Path) -> float:
         """
@@ -225,100 +211,6 @@ class PathPlanningProblem:
             grad[i] = g
 
         return grad
-
-    # def gradient(self, path: Path) -> np.ndarray:
-    #     """
-    #     Computes the gradient ∇F of the objective with respect to all inner
-    #     waypoints p_1, ..., p_{n-2}. The start and goal gradients are fixed
-    #     at zero since those points are never moved.
-
-    #     The total gradient is a linear combination (thesis eq. 3.5):
-    #         ∇F = C1 * ∇L + C2 * ∇E + C3 * ∇R
-
-    #     Each component is computed differently:
-    #       - ∇L: analytical (thesis eq. 3.2)
-    #       - ∇E: numerical finite differences (terrain is smooth, this is sufficient)
-    #       - ∇R: analytical + segment-weighted chain rule (see risk_gradient_at_waypoint)
-
-    #     Args:
-    #         path: Current path whose inner waypoints are being optimized.
-
-    #     Returns:
-    #         np.ndarray of shape (n_points, 2). Rows 0 and n-1 are always zero.
-    #     """
-    #     n = path.n_points
-    #     grad = np.zeros_like(path.points)
-
-    #     for i in range(1, n - 1):
-    #         pi = path.points[i]
-    #         p_prev = path.points[i - 1]
-    #         p_next = path.points[i + 1]
-
-    #         # Analytical length gradient (thesis eq. 3.2):
-    #         # Two unit vectors from pi toward its neighbors, summed.
-    #         # On a straight-line path these cancel → zero → initial path
-    #         # must be perturbed before running the optimizer.
-    #         v1 = pi - p_prev
-    #         v2 = pi - p_next
-    #         gL = v1 / (np.linalg.norm(v1) + 1e-8) + \
-    #             v2 / (np.linalg.norm(v2) + 1e-8)
-
-    #         # Numerical gradient for energy (finite differences).
-    #         # Terrain is stored as a smooth bilinear grid so this is accurate.
-    #         gE = self._numerical_gradient_single_point(path, i, self.path_energy)
-
-    #         # Analytical segment-consistent risk gradient.
-    #         # This accounts for all sample points on adjacent segments
-    #         # that are influenced by moving waypoint i.
-    #         gR = self.risk_gradient_at_waypoint(path, i)
-
-    #         grad[i] = self.c1 * gL + self.c2 * gE + self.c3 * gR
-
-    #     return grad
-    
-    # def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
-    #     """
-    #     Computes the gradient of the segment-sampled risk with respect to a
-    #     single waypoint p_index, consistent with path_risk().
-
-    #     Moving waypoint p_i shifts all interpolated sample points on the two
-    #     adjacent segments. By the chain rule:
-    #       - On segment [p_{i-1}, p_i]: sample s(t) = (1-t)*p_{i-1} + t*p_i
-    #         so ∂s/∂p_i = t
-    #       - On segment [p_i, p_{i+1}]: sample s(t) = (1-t)*p_i + t*p_{i+1}
-    #         so ∂s/∂p_i = (1-t)
-
-    #     The risk gradient at each sample is provided analytically by the map
-    #     (via obstacle distance_and_gradient methods), ensuring correctness
-    #     even when samples are inside or near obstacle boundaries.
-
-    #     Args:
-    #         path:  Current path.
-    #         index: Index of the waypoint to differentiate with respect to.
-
-    #     Returns:
-    #         np.ndarray of shape (2,) — gradient vector at this waypoint.
-    #     """
-    #     samples = 10   # same resolution as path_risk
-    #     grad = np.zeros(2)
-    #     pts = path.points
-    #     n = path.n_points
-
-    #     # contribution from segment [p_{index-1}, p_{index}]
-    #     if index > 0:
-    #         for t in np.linspace(0, 1, samples, endpoint=False):
-    #             s = (1 - t) * pts[index - 1] + t * pts[index]
-    #             g = self.map.collision_risk_gradient_at(s)
-    #             grad += t * g          # chain rule: ds/dp_i = t
-
-    #     # contribution from segment [p_{index}, p_{index+1}]
-    #     if index < n - 1:
-    #         for t in np.linspace(0, 1, samples, endpoint=False):
-    #             s = (1 - t) * pts[index] + t * pts[index + 1]
-    #             g = self.map.collision_risk_gradient_at(s)
-    #             grad += (1 - t) * g   # chain rule: ds/dp_i = (1-t)
-
-    #     return grad
 
     def risk_gradient_at_waypoint(self, path: Path, index: int) -> np.ndarray:
         """

@@ -73,7 +73,9 @@ class AdamPathOptimizer(PathOptimizer):
                  beta2: float = 0.999,
                  eps: float = 1e-8,
                  max_iters: int = 500,
-                 tolerance: float = 1e-6):
+                 tolerance: float = 1e-6,
+                 patience: int = 10,
+                 patience_tol: float = 1e-2):
         super().__init__(problem)
         self.lr = lr
         self.beta1 = beta1
@@ -81,6 +83,8 @@ class AdamPathOptimizer(PathOptimizer):
         self.eps = eps
         self.max_iters = max_iters
         self.tolerance = tolerance
+        self.patience = patience
+        self.patience_tol = patience_tol
 
     def optimize(self, initial_path: Path) -> Path:
         """
@@ -101,6 +105,8 @@ class AdamPathOptimizer(PathOptimizer):
 
         m = np.zeros_like(path.points)
         v = np.zeros_like(path.points)
+
+        recent_values = []
 
         t = 0
         for _ in range(self.max_iters):
@@ -130,13 +136,19 @@ class AdamPathOptimizer(PathOptimizer):
             new_points[1:-1] -= step  # gradient descent direction
             
             # keep waypoints within map bounds
-            new_points[1:-1, 0] = np.clip(
-                new_points[1:-1, 0], 0, self.problem.map.width
-            )
-            new_points[1:-1, 1] = np.clip(
-                new_points[1:-1, 1], 0, self.problem.map.height
-            )
+            new_points[1:-1, 0] = np.clip(new_points[1:-1, 0], 0, self.problem.map.width)
+            new_points[1:-1, 1] = np.clip(new_points[1:-1, 1], 0, self.problem.map.height)
             path.points = new_points
+
+            recent_values.append(obj)
+            if len(recent_values) > self.patience:
+                recent_values.pop(0)
+            
+            if len(recent_values) == self.patience:
+                improvement = recent_values[0] - recent_values[-1]
+                if improvement < self.patience_tol:
+                    print(f"Adam converged at iteration {_},  obj={obj:.4f}")
+                    break
 
         return path
 
@@ -194,13 +206,17 @@ class ParticleSwarmOptimizer(PathOptimizer):
                  max_iters: int = 500,
                  omega: float = 0.4,
                  phi_p: float = 1.0,
-                 phi_g: float = 1.0):
+                 phi_g: float = 1.0,
+                 patience: int = 10,
+                 patience_tol: float = 1e-1):
         super().__init__(problem)
         self.n_particles = n_particles
         self.max_iters = max_iters
         self.omega = omega
         self.phi_p = phi_p
         self.phi_g = phi_g
+        self.patience = patience
+        self.patience_tol = patience_tol
 
         self.particles: List[PSOParticle] = []
         self.global_best_path: Path | None = None
@@ -311,6 +327,8 @@ class ParticleSwarmOptimizer(PathOptimizer):
         """
         self._init_swarm(initial_path)
 
+        recent_best = []
+
         for it in range(self.max_iters):
             # store global best into history for visualization
             if self.global_best_path is not None:
@@ -337,6 +355,11 @@ class ParticleSwarmOptimizer(PathOptimizer):
                 v[0] = 0.0
                 v[-1] = 0.0
 
+                v_max = 10.0
+                v_norm = np.linalg.norm(v[1:-1], axis=1, keepdims=True)
+                scale = np.minimum(1.0, v_max / (v_norm + 1e-8))
+                v[1:-1] = v[1:-1] * scale
+
                 x_new = x + v
                 # clamp to map bounds
                 x_new[:, 0] = np.clip(x_new[:, 0], 0, self.problem.map.width)
@@ -356,6 +379,18 @@ class ParticleSwarmOptimizer(PathOptimizer):
                 if val < self.global_best_value:
                     self.global_best_value = val
                     self.global_best_path = particle.position.copy()
+                
+            recent_best.append(self.global_best_value)
+            if len(recent_best) > self.patience:
+                recent_best.pop(0)
+
+            if len(recent_best) == self.patience:
+                improvement = recent_best[0] - recent_best[-1]
+                #print(f"  it={it:>4}  improvement over last {self.patience} iters: {improvement:.2e}")
+                if improvement < self.patience_tol:
+                    print(f"PSO converged at iteration {it}, "
+                        f"obj={self.global_best_value:.4f}")
+                    break
 
         if self.global_best_path is None:
         # fallback: return initial_path or raise error

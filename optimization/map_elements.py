@@ -10,15 +10,6 @@ class GameMap:
     (list of Obstacle subclasses) to implement the three sub-objectives
     from the thesis: energy E(γ), and risk R(γ).
 
-    The risk function uses a Khatib-style artificial potential field:
-        U(d) = 0.5 * (1/d - 1/d_0)²   for d < d_0
-               0                         for d >= d_0
-
-    This formulation (from robotics potential field literature) provides:
-      - Smooth repulsion that grows to infinity at d=0
-      - Zero influence beyond influence_radius d_0
-      - Non-zero gradient everywhere, which is essential for gradient-based optimization
-
     Attributes:
         width, height (float):          Physical map dimensions.
         terrain (TerrainField):         Terrain energy grid.
@@ -142,8 +133,7 @@ class GameMap:
         toward the point, provided by distance_and_gradient().
 
         Note: this gradient is near-zero at practical distances and collapses
-        to zero inside obstacles — the main reason the Khatib potential
-        was adopted instead. This method exists for experimental testing only.
+        to zero inside obstacles.
         """
         best_dist = float("inf")
         best_grad_dir = np.zeros(2)
